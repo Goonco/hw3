@@ -1,0 +1,10 @@
+# Pinned to the versions of the staff reference run (Python 3.11.5, CUDA 13 driver, one A40 48GB).
+# Newer versions may work, but vLLM in particular changes its API and defaults often.
+torch==2.13.0
+transformers==5.17.0
+accelerate==1.15.0
+safetensors==0.8.0
+pytest==9.1.1
+matplotlib==3.11.2
+# Optional but strongly recommended (much faster evaluation and sampling).
+vllm==0.30.0
