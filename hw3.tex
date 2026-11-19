@@ -1,0 +1,799 @@
+\documentclass[11pt]{article}
+
+% ---------------------------------------------------------------------------
+% Staff: release information.
+\newcommand{\assigneddate}{Wednesday, October 21, 2026}
+\newcommand{\duedate}{Wednesday, November 18, 2026}
+\newcommand{\coderelease}{the starter-code folder distributed with this handout}
+\newcommand{\staffsft}{\file{staff\_sft/} (in your starter-code folder)}
+% Result thresholds = 0.9 x min staff reference accuracy over 2 runs (grading/thresholds.json).
+\newcommand{\thrsft}{0.594}
+\newcommand{\thrdpo}{0.617}
+\newcommand{\thrgrpo}{0.677}
+% ---------------------------------------------------------------------------
+
+\usepackage[margin=1.1in]{geometry}
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{framed}
+\usepackage{fancyhdr}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{listings}
+\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue]{hyperref}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0pt}
+\cfoot{Page \thepage}
+\fancypagestyle{plain}{\fancyhf{}\renewcommand{\headrulewidth}{0pt}\cfoot{\thepage}}
+
+\lstset{basicstyle=\ttfamily\small,columns=fullflexible,keepspaces=true,breaklines=true,
+        xleftmargin=1.5em,frame=none,upquote=true}
+
+% Inside solution boxes, figure environments become non-floating (a float inside a framed box is a LaTeX
+% error), so \begin{figure}...\caption{...}\end{figure} works as usual.
+\makeatletter
+\newenvironment{solution}{\begin{framed}\noindent\textbf{Solution:}\par
+  \renewenvironment{figure}[1][]{\par\medskip\centering\def\@captype{figure}}{\par\medskip}}{\end{framed}}
+\makeatother
+\setlength{\emergencystretch}{3em}
+\newcommand{\pts}[1]{\textnormal{[#1~pts]}}
+\newcommand{\file}[1]{\texttt{#1}}
+\newcommand{\resultfigure}[3]{%
+  \IfFileExists{#2}{%
+    \begin{figure}
+      \includegraphics[width=#1]{#2}
+      \caption{#3}
+    \end{figure}%
+  }{\par\noindent\emph{[Pending figure]} \texttt{\detokenize{#2}}\par}%
+}
+
+\title{CSE595: Natural Language Processing\\Homework 3\\[0.3em]
+\large Post-Training a Small Language Model to Reason}
+% Students: put your name and uniqname here.
+\author{[Kyungho (Matthew) Song] (\texttt{[songkh]})}
+\date{Assigned date: \assigneddate{} --- Due date: \duedate}
+
+\begin{document}
+\maketitle
+
+\noindent\textcolor{red}{\textbf{This assignment requires GPU computation on Great Lakes, a shared computing cluster at
+UMich (about 2--3 A40 GPU-hours per student). You may need to wait in a queue to run your jobs, so please
+start as early as possible!}}
+
+\section*{Use of AI Tools}
+While AI can be a valuable learning tool, it should not replace your own reasoning, critical thinking, and
+problem-solving. You may use AI tools to help clarify concepts, understand algorithms, explore programming
+techniques, and debug your code. However, you may not simply provide an assignment to an AI tool and ask it to
+complete the work for you. You are expected to develop your own solutions and fully understand the work you
+submit. You must \textbf{fully disclose how you used AI tools} in the ``Disclosure'' section of the assignment, including
+the tools used and the nature of the assistance received.
+
+\section*{Submission Guidelines}
+\begin{enumerate}
+  \item Please insert your student information (name and uniqname) in the \verb|\author| line of this \LaTeX{} file.
+  \item Please insert your answers between each pair of \verb|\begin{solution}| and \verb|\end{solution}|.
+  \item Get the starter code from \coderelease. Implement the \texttt{TODO}s in
+        \file{posttrain/\{common, sft, preference, grpo, test\_time, gsm8k\}.py}. Do not edit the other provided
+        files (see ``Grading'').
+  \item We use \href{https://www.gradescope.com/courses/1384990}{Gradescope} for homework submission.
+  \item We have two submission portals on Gradescope: \mbox{\texttt{Homework 3 - Coding}} and
+        \mbox{\texttt{Homework 3 - Written}}.
+  \item On Great Lakes, package your code and results with
+        \begin{lstlisting}
+python scripts/make_submission.py --uniqname <uniqname>\end{lstlisting}
+        and submit \file{submission\_<uniqname>.zip} to \mbox{\texttt{Homework 3 - Coding}} (83 pts). The coding
+        problems will be graded automatically. Checklist for the zip (the script reports anything missing):
+        \begin{itemize}[nosep]
+          \item \file{posttrain/\{common, sft, preference, grpo, test\_time, gsm8k\}.py};
+          \item \file{results/\{sft, dpo, grpo\}/\{predictions.jsonl, metrics.json\}};
+          \item \file{results/test\_time/test\_time.json};
+          \item \file{results/gsm8k/\{A\_standard, B\_standard, A\_improved\}/predictions.jsonl}.
+        \end{itemize}
+  \item Please compile this file to \file{hw3.pdf} (e.g.\ in Overleaf) and submit the PDF to
+        \mbox{\texttt{Homework 3 - Written}} (Problems 2--7, 17 pts, plus the required Disclosure section).
+        {\color{red}Please make sure that each question is matched to the correct page on Gradescope. Each
+        missing or mismatched question will result in a 1-point deduction.}
+\end{enumerate}
+
+\section*{Overview}
+In this assignment you will take a small \emph{base} language model, Qwen2.5-0.5B~\cite{qwen25}, which cannot
+follow instructions, and walk it through the modern post-training pipeline on a single GPU:
+\begin{enumerate}
+  \item \textbf{Supervised fine-tuning (SFT)} on reasoning traces, so the model learns the output format and a
+        basic search strategy.
+  \item \textbf{Preference optimization (DPO~\cite{dpo} or IPO~\cite{ipo})} on pairs of good and bad answers,
+        labelled automatically by a verifier. This is RLHF~\cite{instructgpt} with the verifier standing in for
+        the human labeller.
+  \item \textbf{Reinforcement learning with a verifiable reward (GRPO~\cite{deepseekmath})}, where the model
+        improves from its own rollouts.
+  \item \textbf{Test-time scaling}, where you trade extra inference compute for accuracy with majority
+        voting~\cite{selfconsistency}, confidence-based selection and pass@$k$~\cite{codex}.
+  \item \textbf{Benchmarking}, where you evaluate two released instruct models on a standard math benchmark,
+        GSM8K~\cite{gsm8k}, and measure how much the reported accuracy depends on the prompt.
+\end{enumerate}
+You implement the core math of every stage: masked log-likelihoods, the SFT loss, the DPO/IPO losses,
+group-relative advantages, the clipped policy-gradient objective, and the test-time selection rules. We provide
+the training loops, data, evaluation and Slurm scripts, and they call your functions.
+
+\begin{center}
+\begin{tabular}{@{}llr@{}}
+\toprule
+component & how it is graded & points \\
+\midrule
+Unit tests (Problems 1--5) & autograded against hidden test cases & 50 \\
+SFT / DPO / GRPO results & autograded from your \file{predictions.jsonl} & 10 / 6 / 10 \\
+Test-time artifact & autograded consistency check of \file{test\_time.json} & 4 \\
+GSM8K (Problem 7) & autograded from your GSM8K predictions & 3 \\
+Write-up (Problems 2--7) & graded by hand from your solution boxes & 17 \\
+\midrule
+Total & & 100 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section*{The Task: Countdown}
+Given a few integers and a target, write an arithmetic expression that uses \textbf{each number exactly once}
+with \texttt{+ - * /} and parentheses and equals the target~\cite{streamofsearch}. For example:
+\begin{lstlisting}
+Numbers [44, 19, 35], target 98   ->   <answer>(44 + 19) + 35</answer>\end{lstlisting}
+A deterministic verifier (\file{posttrain/countdown.py}) checks answers exactly using rational arithmetic, so
+there is no LLM judge and no human labelling. The reward is \textbf{1.0} if the answer is correct, \textbf{0.1}
+if an \texttt{<answer>} block exists but is wrong, and \textbf{0.0} otherwise. All problems use 3 or 4 numbers.
+The data is in \file{data/}:
+\begin{center}
+\begin{tabular}{@{}lrp{6.4cm}@{}}
+\toprule
+file & size & use \\
+\midrule
+\file{sft\_train.jsonl} / \file{sft\_val.jsonl} & 8000 / 200 & prompt + synthetic search trace (a few failed tries, then a correct one) \\
+\file{countdown\_train.jsonl} & 20000 & prompts for preference-pair sampling and RL \\
+\file{countdown\_val.jsonl} & 200 & monitoring during RL \\
+\file{pref\_pairs.jsonl} & 1851 & preference pairs built from the staff SFT model (Problem 3) \\
+\file{countdown\_test.jsonl} & 500 & \textbf{graded; never train or tune on it} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section*{Getting Started}
+\textbf{Do all the implementation work on your laptop or a Great Lakes login node first.} Every unit test runs
+on a CPU in seconds:
+\begin{lstlisting}
+pip install torch pytest
+python -m pytest tests/                   # all fail at first: NotImplementedError
+python -m pytest tests/test_sft.py -x -q  # one file, stop at the first failure\end{lstlisting}
+On Great Lakes, set up the environment once from a login node, then submit jobs:
+\begin{lstlisting}
+bash slurm/setup_env.sh    # creates a venv in your scratch space (~10 min)
+sbatch slurm/sft.sbatch    # then dpo, grpo, grpo_ablation, test_time, gsm8k
+squeue -u $USER            # monitor; logs go to logs/\end{lstlisting}
+Before a full run, smoke-test on a GPU with small sizes, for example \texttt{-{}-max-examples 256 -{}-epochs 1}
+(SFT), \texttt{-{}-steps 3 -{}-prompts-per-step 8} (GRPO) and \texttt{-{}-limit 50 -{}-backend hf} (evaluation). \textbf{Graded evaluation must use
+the full test set.} If a test fails, read the assertion message: it names the quantity and shows the expected
+and actual values.
+
+\paragraph{Plots for the write-up.} You do not need to write plotting code. After each stage, run
+\begin{lstlisting}
+python scripts/plot_results.py   # CPU only; run it on a login node\end{lstlisting}
+It reads \file{results/} and saves every figure the write-up asks for (the file names are given in each
+problem below; stages that have not run yet are skipped), and it prints a table of accuracy and format rate for
+every finished run. Recompile this document with the generated figures at the listed paths to include them.
+
+% =====================================================================================
+\section*{Notation and Conventions}
+Every training stage in this assignment works on the same kind of data: a \emph{prompt} $x$ (the Countdown
+question) followed by a \emph{response} $y$ (the model's answer). The symbols below are used throughout the
+handout and the docstrings.
+\begin{center}
+\begin{tabular}{@{}l>{\raggedright\arraybackslash}p{11.2cm}@{}}
+\toprule
+symbol & meaning \\
+\midrule
+$B$ & batch size: the number of (prompt, response) sequences processed together. \\
+$L$ & length, in tokens, of the longest prompt+response sequence in the batch; shorter sequences are
+      \emph{padded} on the right with a pad token up to length $L$. \\
+$T$ & $= L-1$, the number of next-token predictions per sequence (see Problem 1, item 1). \\
+$V$ & vocabulary size (151{,}936 for Qwen2.5). \texttt{model(input\_ids).logits} has shape $(B, T, V)$. \\
+$\pi_\theta$ & the model being trained (the \emph{policy}), with parameters $\theta$. \\
+$\ell_{b,t}$ & $\log\pi_\theta(\text{token } t{+}1 \text{ of sequence } b \mid \text{tokens } 1..t)$: the
+      per-token log-probability of the next token, a $(B, T)$ tensor called \texttt{log\_probs} or
+      \texttt{policy\_log\_probs} in the code. \\
+$m_{b,t}$ & the \emph{response mask}: 1 if the token being predicted at position $t$ belongs to the response,
+      0 if it belongs to the prompt or is padding. Losses only count positions with $m_{b,t}=1$, because we want
+      to train the model to \emph{write answers}, not to reproduce the question. \\
+$K$ & number of gradient-accumulation steps (\texttt{gradient\_accumulation\_steps}). A batch that does not fit
+      in GPU memory is split into $K$ \emph{micro-batches}; each micro-batch calls \texttt{backward()} on its loss
+      divided by $K$, so the gradients that add up in \texttt{.grad} equal the gradient of the batch-average
+      loss. The optimizer then takes one step. \\
+\bottomrule
+\end{tabular}
+\end{center}
+\emph{Greedy decoding} always picks the most likely next token (temperature 0), so it is deterministic;
+\emph{sampling} at temperature 1 draws each token at random from the model's distribution. \emph{Accuracy} is the fraction of test
+problems the verifier marks correct; \emph{format rate} is the fraction of responses that contain an
+\texttt{<answer>...</answer>} block at all, correct or not.
+
+% =====================================================================================
+\section*{Problem 1: Shared Utilities \pts{12}}
+All functions are in \file{posttrain/common.py} and tested by \file{tests/test\_common.py} (12 pts, autograded).
+These are the building blocks that SFT, DPO and GRPO all reuse: turn text into tensors, ask the model how likely
+each response token is, and average over the response tokens only. Read each docstring carefully: the tests check
+exact shapes and conventions.
+\begin{enumerate}
+  \item (Programming) Please implement \texttt{tokenize\_prompt\_and\_output()}. Tokenize each prompt and each
+        output \emph{separately}, concatenate them, and right-pad the batch with the pad token to get a $(B, L)$
+        tensor $\texttt{full}$. Return $\texttt{input\_ids} = \texttt{full}[:, :\!-1]$,
+        $\texttt{labels} = \texttt{full}[:, 1:]$ and a boolean \texttt{response\_mask} over \texttt{labels} that
+        is true exactly where the label token belongs to the output (not the prompt, not padding).
+
+        \emph{Why the shift?} A language model reads tokens $1..t$ and predicts token $t{+}1$, so the target
+        (\texttt{labels}) at position $t$ is the input shifted left by one. This is called \emph{teacher forcing}:
+        one forward pass scores every response token at once. Example with $B=2$, where sequence~1 has prompt
+        tokens \texttt{p1 p2 p3} and output tokens \texttt{o1 o2}, and sequence~2 has prompt \texttt{q1 q2} and
+        output \texttt{r1} (so $L=5$ and $T=4$):
+\begin{center}
+\begin{tabular}{@{}l|cccc|cccc@{}}
+\toprule
+ & \multicolumn{4}{c|}{sequence 1} & \multicolumn{4}{c}{sequence 2} \\
+\midrule
+\texttt{full}           & \multicolumn{4}{c|}{\texttt{p1 p2 p3 o1 o2}} & \multicolumn{4}{c}{\texttt{q1 q2 r1 PAD PAD}} \\
+\texttt{input\_ids}     & \texttt{p1} & \texttt{p2} & \texttt{p3} & \texttt{o1} & \texttt{q1} & \texttt{q2} & \texttt{r1} & \texttt{PAD} \\
+\texttt{labels}         & \texttt{p2} & \texttt{p3} & \texttt{o1} & \texttt{o2} & \texttt{q2} & \texttt{r1} & \texttt{PAD} & \texttt{PAD} \\
+\texttt{response\_mask} & F & F & T & T & F & T & F & F \\
+\bottomrule
+\end{tabular}
+\end{center}
+  \item (Programming) Please implement \texttt{compute\_entropy()}, the entropy
+        $H(p) = -\sum_v p_v \log p_v$ (in nats, i.e.\ natural log) of $p=\mathrm{softmax}(\text{logits})$ over the
+        last dimension. Entropy measures how spread out the next-token distribution is; GRPO logs it to show
+        whether the model is becoming more deterministic.
+
+        \emph{Numerical stability.} Logits can be large, e.g.\ around $10^3$ in absolute value (the hidden tests
+        use such values). Computing $p_v = e^{z_v}/\sum_u e^{z_u}$ directly overflows: $e^{1000}$ is
+        \texttt{inf} in floating point, and then $\log 0 = -\infty$ and $0\cdot(-\infty)$ give \texttt{nan}.
+        Instead compute $\log p$ with \texttt{torch.log\_softmax} (which subtracts the maximum logit internally
+        and never forms $e^{1000}$), then $H = -\sum_v e^{\log p_v}\log p_v$. Your function must return finite
+        values for such inputs.
+  \item (Programming) Please implement \texttt{get\_response\_log\_probs()}: for every position, the
+        log-probability of the label token given the prefix, $\ell_{b,t} = \log \pi_\theta(\texttt{labels}[b,t]
+        \mid \texttt{input\_ids}[b, 0..t])$, computed in float32 from \texttt{model(input\_ids).logits},
+        optionally together with the per-token entropy. In words: take the log-softmax over the vocabulary at
+        every position, then pick out the entry of the token that actually comes next (\texttt{torch.gather}).
+        The result has shape $(B, T)$; masking happens later, in the loss.
+  \item (Programming) Please implement \texttt{masked\_mean()} and \texttt{masked\_normalize()}: the mean, and
+        the sum divided by a constant, of a tensor over the positions where a mask is nonzero, either over all
+        elements or along one dimension. For example, with
+        $\texttt{tensor} = [[1, 2, 3], [4, 5, 6]]$ and $\texttt{mask} = [[1, 1, 0], [0, 1, 1]]$:
+        \texttt{masked\_mean} with \texttt{dim=None} is $(1+2+5+6)/4 = 3.5$, with \texttt{dim=1} it is
+        $[1.5, 5.5]$, and \texttt{masked\_normalize} with constant $2$ and \texttt{dim=1} is $[1.5, 5.5]$
+        (sums $3$ and $11$, divided by $2$). The losses in Problems 2--4 use these to average over response
+        tokens only.
+\end{enumerate}
+\textbf{Hint.} The \texttt{response\_mask} convention (which positions count) is the most common source of bugs.
+Draw a picture of one short example, like the table above, before you write code.
+
+% =====================================================================================
+\section*{Problem 2: Supervised Fine-Tuning \pts{18}}
+\begin{enumerate}
+  \item (Programming, 6 pts) Please implement the SFT loss in \file{posttrain/sft.py}, function
+        \texttt{sft\_microbatch\_train\_step()}. SFT is ordinary next-token cross-entropy on the response
+        tokens: we maximize the log-probability of the reference solution (here, a synthetic search trace that
+        tries a few expressions and ends with a correct one). With the per-token log-probabilities $\ell_{b,t}$ and
+        response mask $m_{b,t}$ of one micro-batch (see Notation), a normalizing constant $c$
+        (\texttt{normalize\_constant}) and $K$ gradient-accumulation steps, the loss is
+        \[
+          \mathcal{L}_\text{SFT} = -\frac{1}{K}\cdot\frac{1}{B}\sum_{b=1}^{B}\frac{1}{c}\sum_{t} m_{b,t}\,\ell_{b,t}.
+        \]
+        The minus sign turns ``maximize log-likelihood'' into a loss to minimize. The training script passes
+        $c$ = the average number of response tokens per sequence in the micro-batch, which makes the loss a
+        per-token average. Call \texttt{backward()} on it inside the function.
+  \item (Experiment, 10 pts) Train and evaluate. The job first evaluates the \emph{base} model (Qwen2.5-0.5B before
+        any training) once for comparison, then runs SFT for 2 epochs (2 passes over the 8000 training examples)
+        and evaluates your model with greedy decoding on the 500 test problems:
+\begin{lstlisting}
+sbatch slurm/sft.sbatch   # -> results/base/ and results/sft/\end{lstlisting}
+        Full credit requires a greedy test accuracy of at least \thrsft; below that, credit is proportional to
+        accuracy.
+  \item (Write-up, 2 pts) Include the training and validation loss plot, \file{results/sft/loss.png}.
+        Report greedy accuracy and format rate for the base model and for your SFT model (\file{plot\_results.py}
+        prints both; they come from the \file{metrics.json} files). Why do we mask prompt tokens out of the loss, and what would change
+        if we did not?
+\end{enumerate}
+\begin{solution}
+\resultfigure{0.6\linewidth}{results/sft/loss.png}{SFT training and validation loss.}
+
+The base model reached [base accuracy] greedy accuracy with a format
+rate of [base format rate]. After SFT, greedy accuracy was [SFT accuracy]
+and the format rate was [SFT format rate].
+
+Masking the prompt makes the objective the conditional log-likelihood of
+the response given the question. The model still reads the prompt when
+predicting response tokens. Including prompt tokens would also reward
+predicting the question itself, and longer prompts could take up a larger
+share of the loss.
+\end{solution}
+
+% =====================================================================================
+\section*{Problem 3: Preference Optimization \pts{19}}
+Preference optimization learns from \emph{pairs}: for the same prompt $x$, a \emph{chosen} (better) response
+$y_w$ and a \emph{rejected} (worse) response $y_l$. Instead of imitating one reference answer as in SFT, the model
+is pushed to make $y_w$ more likely \emph{relative to} $y_l$. Write $\pi_\theta$ for the policy being trained,
+$\pi_\text{ref}$ for a frozen copy of the SFT model (the \emph{reference policy}, which is never updated), and
+$\log\pi(y\mid x)$ for the log-probability of a whole response, i.e.\ the sum of its per-token
+log-probabilities. Let
+\[
+  h = \bigl[\log\pi_\theta(y_w\mid x) - \log\pi_\text{ref}(y_w\mid x)\bigr]
+    - \bigl[\log\pi_\theta(y_l\mid x) - \log\pi_\text{ref}(y_l\mid x)\bigr].
+\]
+Each bracket measures how much more likely the policy makes a response than the reference does; DPO calls
+$\beta$ times this bracket the \emph{implicit reward} of the response. So $h>0$ means the policy has moved
+towards the chosen response and away from the rejected one. The hyper-parameter $\beta>0$ (default 0.1)
+controls how far the policy may drift from the reference: smaller $\beta$ allows larger changes.
+\paragraph{Staff SFT checkpoint.} If your SFT model is weak (for example, below the SFT threshold), you may start
+Problems 3--5 from the staff SFT checkpoint,
+\begin{center}\staffsft,\end{center}
+by submitting jobs with \texttt{USE\_STAFF\_SFT=1}, e.g.\ \texttt{USE\_STAFF\_SFT=1 sbatch slurm/dpo.sbatch}. Your SFT result is still graded on your own SFT model, and
+DPO/GRPO results are graded the same way either way; just say in your write-up which starting point you used.
+\begin{enumerate}
+  \item (Programming, 10 pts for items 1--2) Please implement \texttt{sequence\_log\_probs()} in
+        \file{posttrain/preference.py}: the sum of token log-probabilities over the response tokens of each sequence.
+  \item (Programming) Please implement \texttt{preference\_loss()}, with
+        $\mathcal{L}_\text{DPO} = -\log\sigma(\beta h)$, where $\sigma(z) = 1/(1+e^{-z})$ is the sigmoid, and
+        $\mathcal{L}_\text{IPO} = \bigl(h - \tfrac{1}{2\beta}\bigr)^2$, both averaged over the batch. DPO keeps
+        pushing $h$ up; IPO pulls $h$ towards the fixed target $1/(2\beta)$, which limits over-fitting. Also return
+        the four metrics described in the docstring: chosen reward $\beta[\log\pi_\theta(y_w)-\log\pi_\text{ref}(y_w)]$,
+        rejected reward (the same for $y_l$), reward margin $\beta h$, and reward accuracy (the fraction of
+        pairs with $h>0$). Use \texttt{torch.nn.functional.logsigmoid} rather than \texttt{log(sigmoid(...))}, for
+        the same numerical reason as in Problem 1.
+  \item (Experiment, 6 pts) We provide \file{data/pref\_pairs.jsonl}. To build it, the staff decoded 7000 training
+        prompts greedily with the staff SFT model; it got 2378 of them wrong. For each of those, the staff sampled 8
+        responses ($T=1$) and labelled them with the verifier. Whenever at least one sample was correct, a correct
+        sample became the chosen response and the model's own wrong \emph{greedy} completion became the rejected
+        response. Run DPO against a frozen copy of your SFT model as the reference policy:
+\begin{lstlisting}
+sbatch slurm/dpo.sbatch   # DPO + evaluation -> results/dpo/\end{lstlisting}
+        Full credit requires a greedy test accuracy of at least \thrdpo. Keep the default learning rate
+        ($3\times10^{-7}$): with these pairs, staff runs at $7\times10^{-7}$ and above collapsed.
+        (Optional: delete or rename \file{data/pref\_pairs.jsonl} and the job will build the pairs from your own
+        SFT model, which adds about 15 minutes.)
+  \item (Write-up, 3 pts) Include the plot of validation reward accuracy and reward margin over training
+        (\file{results/dpo/rewards.png}), and compare your DPO test accuracy to your SFT test accuracy. In a staff experiment, pairs whose rejected response was a wrong \emph{sampled} response
+        instead of the wrong greedy completion did not improve greedy accuracy at all. Look at the rejected responses
+        in \file{data/pref\_pairs.jsonl} and at your SFT model's wrong greedy completions in
+        \file{results/sft/predictions.jsonl}, and explain why the choice of rejected response matters. In 3--5
+        sentences, explain why this pipeline counts as ``RLHF'' even though no human labelled anything, and what role
+        $\beta$ plays. Finally, only the 2378 greedy failures were used, and 527 of them were then discarded because
+        none of the 8 samples was correct. What does that imply about which problems DPO can learn from?
+\end{enumerate}
+\begin{solution}
+\resultfigure{0.95\linewidth}{results/dpo/rewards.png}{DPO validation reward accuracy and margin.}
+
+DPO started from [SFT checkpoint used]. Its greedy test accuracy was
+[DPO accuracy], compared with [SFT accuracy] for my SFT model.
+
+In the supplied preference data, 1,790 of the 1,851 rejected completions
+lack a complete answer block. For example, in \texttt{train-00001},
+the rejected completion repeatedly evaluates variations of the same
+expression to 39 for a target of 83. My SFT completion for [test ID]
+shows [observed behavior]. A rejected greedy completion targets an
+error the decoder actually returns at evaluation time. A wrong sampled
+response can have low probability already, so reducing its probability
+may leave the greedy result unchanged.
+
+The verifier supplies the chosen/rejected judgments that human raters
+would supply in an RLHF pipeline. DPO uses these judgments to increase
+the relative likelihood of the chosen response against a frozen SFT
+reference. The parameter $\beta$ scales the policy-reference log-ratio
+margin and controls the strength of the reference constraint.
+
+The 1,851 pairs cover prompts where greedy decoding failed and at least
+one of eight samples succeeded. Prompts already solved greedily and
+prompts with no correct sample among the eight provide no direct
+training signal through these pairs.
+\end{solution}
+
+% =====================================================================================
+\section*{Problem 4: RL with Verifiable Rewards \pts{28}}
+In RL the model learns from its own attempts. One GRPO \emph{step}: take 32 training prompts, sample $G=8$
+responses for each (a \emph{group}) at temperature 1, score every response with the verifier (reward 1.0 /
+0.1 / 0.0, see ``The Task''), and update the model so that responses that scored better than the rest of their
+group become more likely and worse ones less likely. No reference answer and no value network are needed: the
+other samples for the same prompt serve as the baseline.
+
+\paragraph{Advantages.} For a prompt with rewards $r_1,\dots,r_G$, the \emph{advantage} of response $i$ says how
+much better it was than expected:
+$A_i = (r_i - b_i)/(\mathrm{std}(r) + \delta)$ with either the group mean $b_i = \frac{1}{G}\sum_j r_j$ (GRPO)
+or the leave-one-out mean $b_i = \frac{1}{G-1}\sum_{j\neq i} r_j$ (RLOO~\cite{rloo}). Dividing by the
+\emph{population} standard deviation of the group's rewards (divide by $G$, not $G-1$) is optional;
+$\delta = 10^{-6}$ (\texttt{eps} in the code) only avoids division by zero. Example: rewards $(1, 0, 0, 0)$ give
+mean baseline $0.25$, so before normalization the advantages are $(0.75, -0.25, -0.25, -0.25)$. If all rewards
+in a group are equal, every advantage is 0 and that prompt contributes no gradient.
+
+\paragraph{Policy loss.} Each token of response $i$ gets the advantage $A_i$ of its whole response. Vanilla
+policy gradient minimizes $-A_i\,\log\pi_\theta(y_t\mid\cdot)$. GRPO uses the PPO-style clipped
+objective~\cite{ppo}: let $\pi_{\theta_\text{old}}$ be the model \emph{as it was when the responses were
+sampled}, and $\rho_t = \pi_\theta(y_t\mid\cdot)/\pi_{\theta_\text{old}}(y_t\mid\cdot)$ the probability ratio
+(computed as $\exp(\log\pi_\theta - \log\pi_{\theta_\text{old}})$). The per-token loss is
+$-\min\bigl(\rho_t A,\ \mathrm{clip}(\rho_t, 1-\varepsilon, 1+\varepsilon)A\bigr)$ with
+$\varepsilon = 0.2$ (\texttt{clip\_eps}), which removes the incentive to move a token's probability more than
+$\pm 20\%$ away from $\pi_{\theta_\text{old}}$ in one update. A token is \emph{clipped} when the clipped term
+is strictly smaller than the unclipped one; \texttt{clip\_fraction} is the fraction of response tokens that
+are clipped.
+\begin{enumerate}
+  \item (Programming, 14 pts for items 1--4) Please implement \texttt{compute\_group\_advantages()} in
+        \file{posttrain/grpo.py}, with the
+        \texttt{mean} and \texttt{loo} baselines and optional standard-deviation normalization.
+  \item (Programming) Please implement \texttt{per\_token\_policy\_loss()}, as vanilla policy gradient
+        (\texttt{pg}, loss $-A\log\pi_\theta$) or the clipped objective above (\texttt{grpo\_clip}), also returning
+        the mask of tokens where the clipped term is active.
+  \item (Programming) Please implement \texttt{aggregate\_loss()}, which turns the $(B,T)$ per-token loss into
+        one number, with three reductions over response tokens (they differ in how much weight long responses get):
+        \texttt{seq\_mean} (average within each sequence, then over the batch; original GRPO),
+        \texttt{token\_mean} (average over all response tokens; DAPO~\cite{dapo}) and \texttt{constant} (sum
+        divided by batch size times a constant; Dr.~GRPO~\cite{drgrpo}).
+  \item (Programming) Please implement \texttt{grpo\_microbatch\_train\_step()}: per-token loss, aggregation,
+        division by the number of gradient-accumulation steps $K$, and \texttt{backward()}.
+  \item (Experiment, 10 pts) Train with GRPO from your SFT model (100 steps $\times$ 32 prompts $\times$ 8 samples) and
+        evaluate:
+\begin{lstlisting}
+sbatch slurm/grpo.sbatch   # -> results/grpo/\end{lstlisting}
+        \file{results/grpo/train\_log.jsonl} has one line per step with the mean reward of the sampled responses,
+        training accuracy, validation accuracy (greedy, on \file{countdown\_val.jsonl}, every 20 steps), mean
+        token entropy (Problem 1), mean response length in characters (\texttt{response\_chars}),
+        \texttt{clip\_fraction}, and
+        \texttt{frac\_groups\_all\_same}, the fraction of groups in which all 8 samples got the same reward. Full
+        credit requires a greedy test accuracy of at least \thrgrpo.
+  \item (Experiment, part of the write-up points) Run \textbf{one ablation} for 40 steps, choosing one of
+        \begin{itemize}[nosep]
+          \item \texttt{-{}-baseline loo -{}-no-std-normalization} (RLOO),
+          \item \texttt{-{}-aggregation constant -{}-no-std-normalization} (Dr.~GRPO),
+          \item \texttt{-{}-epochs-per-rollout-batch 2} (two optimizer steps per batch of rollouts).
+        \end{itemize}
+        Pass the flags through \texttt{ABLATION}; the results go to \file{results/grpo\_ablation/}:
+\begin{lstlisting}
+ABLATION="--baseline loo --no-std-normalization" \
+    sbatch slurm/grpo_ablation.sbatch\end{lstlisting}
+  \item (Write-up, 4 pts) Include the plot of reward, validation accuracy, entropy and response length against
+        step (\file{results/grpo/curves.png}; it also shows \texttt{frac\_groups\_all\_same} and
+        \texttt{clip\_fraction}). Compare your ablation to the first 40 steps of the default run
+        (\file{results/grpo\_ablation/compare.png}) and interpret the difference. What does
+        \texttt{frac\_groups\_all\_same} tell you about the learning signal, and how would you expect it to change
+        for problems that are too easy or too hard? Why is \texttt{clip\_fraction} exactly 0 throughout the
+        default run?
+\end{enumerate}
+\begin{solution}
+\resultfigure{0.95\linewidth}{results/grpo/curves.png}{GRPO training curves (default run).}
+\resultfigure{0.95\linewidth}{results/grpo_ablation/compare.png}{Ablation vs.\ the first 40 steps of the default run.}
+
+The planned ablation uses a leave-one-out baseline without
+standard-deviation normalization. At step 40, validation accuracy is
+[default validation accuracy] for the default run and [ablation
+validation accuracy] for the ablation. The comparison plot also shows
+[observed difference in reward, entropy, or response length].
+
+With a fixed group size $G$, the unnormalized leave-one-out advantage is
+$G/(G-1)$ times the unnormalized mean-baseline advantage. Removing
+standard-deviation normalization also changes the relative weight of
+groups with different reward variance. [Interpret the observed curves
+in light of these two changes.]
+
+\texttt{frac\_groups\_all\_same} measures the fraction of prompts for which
+all sampled responses receive the same reward. Their advantages are
+zero, so they provide no relative policy-gradient signal. This fraction
+can rise for very easy prompts when every sample succeeds and for very
+hard prompts when every sample earns the same low reward.
+
+In the default run, all microbatch losses are computed before the one
+optimizer step for that rollout batch. The current and cached old
+log-probabilities therefore agree when the objective is evaluated.
+The probability ratio is 1, so the clipping condition never activates.
+\end{solution}
+
+% =====================================================================================
+\section*{Problem 5: Test-Time Scaling \pts{16}}
+Instead of a better model, we can spend more compute at inference: sample $k$ responses per problem and choose
+one. With a perfect checker you would just pick a correct sample if there is one; the probability that at least
+one of $k$ samples is correct is \textbf{pass@$k$}. At deployment there is no checker, so we also need
+\emph{verifier-free} selection rules: \textbf{maj@$k$} (majority vote: return the most common answer among the
+$k$ samples) and \textbf{conf@$k$} (return the sample the model is most confident in, measured by its mean
+token log-probability). maj@$k$ and conf@$k$ are the accuracies of these rules.
+\begin{enumerate}
+  \item (Programming, 8 pts for items 1--2) In \file{posttrain/test\_time.py}, please implement
+        \texttt{pass\_at\_k()}, the unbiased estimator~\cite{codex} $\text{pass@}k = 1 - \binom{n-c}{k}\big/\binom{n}{k}$ for $n$ samples of which $c$ are
+        correct. We draw $n \ge k$ samples once and estimate pass@$k$ from them: $\binom{n-c}{k}/\binom{n}{k}$ is the
+        probability that $k$ samples picked without replacement from the $n$ are all wrong. Example: $n=4$, $c=1$,
+        $k=2$ gives $1 - \binom{3}{2}/\binom{4}{2} = 1 - 3/6 = 0.5$. It must be numerically stable for $n$ up to
+        1000: $\binom{1000}{500}$ has about 300 digits and overflows a float, so rewrite the ratio as a product of
+        $k$ terms $\prod_{i=0}^{k-1}\frac{n-c-i}{n-i}$ (or work with logarithms).
+  \item (Programming) Please implement \texttt{majority\_vote()} (most common non-\texttt{None} answer, ties go to
+        the earliest first occurrence) and \texttt{select\_by\_confidence()} (index of the highest score;
+        \texttt{None}/NaN count as $-\infty$; ties go to the smallest index).
+  \item (Experiment, 4 pts) Sample 16 responses for each of 200 test problems from your GRPO model and from your SFT
+        model, and compute \textbf{pass@$k$} (oracle upper bound), \textbf{maj@$k$} (vote over the \emph{value} of
+        each answer) and \textbf{conf@$k$} (pick the sample with the highest mean token log-probability) for
+        $k\in\{1,2,4,8,16\}$:
+\begin{lstlisting}
+sbatch slurm/test_time.sbatch   # -> results/test_time{,_sft}/\end{lstlisting}
+        GRPO results go to \file{results/test\_time/} and SFT results to \file{results/test\_time\_sft/}.
+        The 4 artifact points require a well-formed \file{results/test\_time/test\_time.json} with consistent
+        curves (pass@$k$ non-decreasing in $k$, and maj@$k$ and conf@$k$ not above pass@$k$).
+  \item (Write-up, 4 pts) Include the two plots (\file{results/test\_time/test\_time.png} for GRPO and
+        \file{results/test\_time\_sft/test\_time.png} for SFT; \file{test\_time\_scaling.py} saves them). Explain the gap between pass@$k$ and the two verifier-free
+        methods. Why is plain majority voting over answer \emph{strings} a poor fit for Countdown, and does voting
+        over \emph{values} fix it? Using your numbers, is it better to sample 16 times from the SFT model or once
+        from the GRPO model?
+\end{enumerate}
+\begin{solution}
+\resultfigure{0.48\linewidth}{results/test_time/test_time.png}{Test-time scaling, GRPO model.}
+\resultfigure{0.48\linewidth}{results/test_time_sft/test_time.png}{Test-time scaling, SFT model.}
+
+Pass@$k$ measures how often a subset contains at least one correct
+response. The oracle can always pick that response, while majority
+voting and confidence selection can choose an incorrect response from
+the same subset. String voting splits votes across different expressions
+that evaluate to the same value. Voting by value pools their votes,
+but an incorrect value can still win. An expression can also reach the
+target while violating the requirement to use each given number once.
+
+For SFT at $k=16$, pass@$k$, maj@$k$, and conf@$k$ were [three values].
+For GRPO at $k=1$, the corresponding scores on the same problems were
+[three values]. Under verifier-free selection, [state which setup was
+more accurate and by how much]. With an oracle, [state how the
+comparison changes, if it does].
+\end{solution}
+
+% =====================================================================================
+\section*{Problem 6: Failure Analysis \pts{2}}
+\begin{enumerate}
+  \item (Write-up, 2 pts) Show one incorrect greedy completion from your best model (from
+        \file{results/*/predictions.jsonl}) and diagnose it. Is it an arithmetic slip, a number-reuse violation, a
+        formatting error, a search failure, or a repetition loop that runs out of the 384-token budget? How common
+        is that failure type among your model's errors?
+\end{enumerate}
+\begin{solution}
+The model with the highest greedy test accuracy was [model].
+On [test ID], the task was to use [numbers] to reach [target].
+The model produced the following completion.
+
+\begin{lstlisting}
+[Paste the actual completion.]
+\end{lstlisting}
+
+I classified this as [failure type] because [specific evidence from
+the trace or final expression]. Using [classification rule], I found
+[count] instances of this failure among [total] incorrect completions,
+or [percentage]\% of the errors.
+\end{solution}
+
+% =====================================================================================
+\section*{Problem 7: Closed-Ended Benchmarking \pts{5}}
+So far you have measured accuracy on Countdown with our own verifier. Most published LM benchmarks work the same
+way: a fixed set of \emph{closed-ended} questions, each with one correct answer, a fixed prompt, a fixed decoding
+method, and a rule that extracts the answer from the completion and compares it with the gold answer. In this
+problem you run such a benchmark yourself, and you see that the prompt is part of the measurement.
+
+We use GSM8K~\cite{gsm8k}, a set of grade-school math word problems whose answers are numbers, and evaluate on
+its first 100 test problems (\file{data/gsm8k\_first\_100.jsonl}). The two models are released instruct models
+that you do not train: \textbf{model A} is Qwen2.5-0.5B-Instruct and \textbf{model B} is
+Qwen2.5-1.5B-Instruct (both are downloaded from Hugging Face the first time they are used). This problem is
+evaluation only: there is no training, and the whole job takes about 16 minutes on one GPU, mostly spent loading the models.
+
+\file{posttrain/gsm8k.py} provides the benchmark: \texttt{standard\_prompt\_template()} (used in
+part~1), \texttt{extract\_answer()} and \texttt{is\_correct()} (numeric comparison with the gold answer).
+Like most GSM8K evaluation harnesses, the extractor is lenient: it reads the first number inside the last
+\texttt{<answer>}\ldots\texttt{</answer>} block; if there is none, the first number inside the last
+\verb|\boxed{...}|; and if there is neither, the last number anywhere in the completion (commas are removed
+first). For this problem the \emph{format rate} is the fraction of completions that give an explicit final
+answer, in \texttt{<answer>} tags or \verb|\boxed{}|. \file{scripts/eval\_gsm8k.py} renders each prompt with
+the model's chat template, decodes greedily with at most 512 new tokens, stops after the first
+\texttt{</answer>}, and writes \file{predictions.jsonl} and \file{metrics.json} (accuracy and format rate).
+\begin{enumerate}
+  \item (Experiment, 2 pts) Evaluate both models with the standard prompt:
+\begin{lstlisting}
+PROMPTS=standard sbatch slurm/gsm8k.sbatch   # -> results/gsm8k/{A_standard,B_standard}/\end{lstlisting}
+        Each run earns 1 point if its \file{predictions.jsonl} contains all 100 problems and every prompt in it
+        is the standard prompt. There is no accuracy threshold.
+  \item (Programming and experiment, 1 pt) Write \texttt{improved\_prompt\_template()} in
+        \file{posttrain/gsm8k.py}: a prompt that makes \textbf{model A} more accurate than the standard prompt
+        does. You may change the instructions, add a system message, or add few-shot example turns (take
+        examples from the GSM8K \emph{training} set or write your own, never from the 100 evaluation problems).
+        The model, the decoding settings and the answer extractor stay fixed. Ask for the final answer as
+        \texttt{<answer>NUMBER</answer>} so that the extractor reads the right number. Then run
+\begin{lstlisting}
+PROMPTS=improved sbatch slurm/gsm8k.sbatch   # -> results/gsm8k/A_improved/\end{lstlisting}
+        You earn the point if the autograder's re-scored accuracy of \file{A\_improved} is strictly higher than
+        that of your \file{A\_standard}.
+  \item (Write-up, 2 pts) Include \file{results/gsm8k/bar.png} (made by \file{plot\_results.py}) and report
+        the accuracy and format rate of the three runs. Show your prompt and explain why it helps, using what you
+        see in the \file{A\_standard} and \file{A\_improved} completions. Compare model A with your prompt to
+        model B with the standard prompt: which model looks better? What does this mean for a paper that
+        compares two models using a single fixed prompt?
+\end{enumerate}
+\begin{solution}
+\resultfigure{0.6\linewidth}{results/gsm8k/bar.png}{GSM8K accuracy on 100 test problems.}
+
+The accuracy and format rate were [accuracy, format rate] for
+\texttt{A\_standard}, [accuracy, format rate] for \texttt{B\_standard},
+and [accuracy, format rate] for \texttt{A\_improved}.
+
+\begin{lstlisting}
+System
+Solve the word problem with short calculations, then put only the final
+number inside <answer>NUMBER</answer>.
+
+User
+A kitchen filled 6 trays with 8 rolls each, then sold 19 rolls.
+How many rolls were left?
+
+Assistant
+6 * 8 = 48 rolls. 48 - 19 = 29 rolls left.
+<answer>29</answer>
+
+User
+A shop sold 9 notebooks for 4 dollars each and 3 folders for
+2 dollars each. How many dollars did the shop collect?
+
+Assistant
+9 * 4 = 36 and 3 * 2 = 6. 36 + 6 = 42 dollars.
+<answer>42</answer>
+
+User
+[The evaluation question.]
+\end{lstlisting}
+
+The prompt gives the model space to write intermediate calculations and
+demonstrates where the final number belongs. On [same test ID], the
+standard prompt produced [observed completion and extracted answer],
+while the revised prompt produced [observed completion and extracted
+answer]. This example suggests [explanation supported by the outputs].
+
+Under the prompts tested, [model and prompt] scored higher by
+[difference] percentage points. A comparison with one fixed prompt
+can reflect how well each model responds to that prompt, so the ranking
+may change under a different reasonable prompt.
+\end{solution}
+
+% =====================================================================================
+\section*{Disclosure (required)}
+Describe how you used AI tools for this assignment (see ``Use of AI Tools'' at the beginning). For each tool,
+give its name (for example ChatGPT, Claude, Gemini or GitHub Copilot), what you used it for (for example
+explaining a concept, explaining an error message, debugging a specific function, or editing the wording of the
+write-up), and which problems or files it touched. If you did not use any AI tools, write ``I did not use AI
+tools for this assignment.''
+\begin{solution}
+I used OpenAI Codex to summarize the assignment and propose and apply a few-shot
+GSM8K prompt for Problem 7.
+\end{solution}
+
+% =====================================================================================
+\section*{Grading and Code Expectations}
+\begin{itemize}
+  \item \textbf{Unit tests (50 pts)} run against \textbf{hidden} test cases that check the same properties as the
+        public tests but use different numbers. Points per test file are proportional to the fraction of its
+        tests that pass (common 12, sft 6, preference 10, grpo 14, test\_time 8). Passing the public tests is
+        necessary but not sufficient, so do not hard-code values.
+  \item \textbf{Results (26 pts).} The autograder re-scores your \file{predictions.jsonl} with its own verifier
+        (\file{metrics.json} is not trusted). You get full credit at or above the threshold and partial credit
+        proportional to accuracy below it. Thresholds are 90\% of the staff reference accuracy.
+  \item \textbf{GSM8K (3 pts).} The autograder re-scores your three GSM8K \file{predictions.jsonl} files with its own
+        copy of \texttt{extract\_answer} and \texttt{is\_correct}; see Problem 7 for what earns each point.
+  \item \textbf{What Gradescope shows.} Right after you submit you see whether all files were found, your
+        re-scored SFT/DPO/GRPO accuracies and points, the test-time artifact check, the GSM8K points, and the public unit tests (worth
+        0 points; the same tests as in your starter code). The hidden unit tests and your total score appear when
+        grades are published. You may resubmit until the deadline; the last submission counts.
+  \item \textbf{Academic integrity.} You may use any resources to understand the material, but you may not copy
+        code from online resources (including public solutions to similar assignments); write your own code.
+        AI tools may be used only as described in ``Use of AI Tools'', and every use must be reported in the
+        Disclosure section.
+  \item \textbf{Do not edit} \file{countdown.py}, \file{evaluate.py}, \file{generation.py},
+        \file{eval\_gsm8k.py}, the provided functions in \file{gsm8k.py}, or the decoding settings. Predictions must come from \file{scripts/evaluate.py} run on the model that the corresponding
+        training script produced; for example, selecting among several samples with the verifier is not allowed.
+        Keep your \file{results/*/final} checkpoints on Great Lakes until grades are released: we spot-check
+        submissions by re-running the evaluation on them. Edited or substituted predictions are an honor-code
+        violation.
+  \item \textbf{Write-up (17 pts)} is graded by hand. A question gets full credit when the requested plot or
+        number is present and the explanation is correct, and half credit when only one of the two is. Plots need
+        axis labels, and claims contradicted by your own numbers get no credit.
+\end{itemize}
+
+% =====================================================================================
+\section*{Computation Guide}
+NLP experiments are commonly performed in a Linux-based shell environment. We recommend using
+\href{https://arc.umich.edu/greatlakes/}{Great Lakes}, a Linux-based computing cluster at UMich, for this
+assignment; the provided Slurm scripts target its \texttt{spgpu} partition (one NVIDIA A40, 48\,GB).
+\textbf{If you have not already, please sign up for a Great Lakes account as soon as possible.}
+
+\noindent\textcolor{red}{\textbf{Please DO NOT use this account for anything other than coursework, unless given
+permission from the instructors. Failure to comply with these requirements will lead to a zero score for this
+assignment.}}
+
+\begin{itemize}
+  \item \textbf{VPN.} To access Great Lakes when not on campus, you will need to use the UMich VPN.
+  \item \textbf{Great Lakes dashboard.} The online dashboard
+        (\href{https://greatlakes.arc-ts.umich.edu}{greatlakes.arc-ts.umich.edu}) offers a file manager
+        (\texttt{Files > Home Directory}), a terminal (\texttt{Clusters > \_greatlakes Shell Access}) and a job
+        composer. You can also SSH into the cluster from a local terminal.
+  \item \textbf{Slurm.} You \textbf{MUST} use Slurm jobs (\texttt{sbatch}) for training and evaluation; the cluster
+        kills long or memory-hungry processes on login nodes. You do not need to edit the provided
+        \file{slurm/*.sbatch} files: they already set the course account (\texttt{cse595f26\_class}), the partition
+        and the resources, and \file{slurm/env.sh} sets up the environment. Always run \texttt{sbatch} from the top
+        of your starter-code folder. The course account allows each student \textbf{one GPU job at a time} and at
+        most \textbf{4 hours per job}, and the whole class shares 20 GPUs, so jobs may wait in the queue: submit
+        the next stage as soon as the previous one finishes.
+  \item \textbf{Python environment.} \file{slurm/setup\_env.sh} creates a virtual environment in your scratch
+        space with the pinned package versions in \file{requirements.txt}. Model downloads go to scratch, not
+        your home directory.
+\end{itemize}
+
+\paragraph{Compute budget.} Measured wall times of the staff reference run on one A40:
+\begin{center}
+\begin{tabular}{@{}lp{6.6cm}r@{}}
+\toprule
+job & what it runs & wall time \\
+\midrule
+\file{sft.sbatch} & base-model evaluation, SFT (8000 examples $\times$ 2 epochs), evaluation & $\approx$ 20 min \\
+\file{dpo.sbatch} & DPO on the provided pairs, evaluation & $\approx$ 10 min \\
+\file{grpo.sbatch} & GRPO (100 steps), evaluation & $\approx$ 70 min \\
+\file{grpo\_ablation.sbatch} & GRPO ablation (40 steps) & $\approx$ 30 min \\
+\file{test\_time.sbatch} & 16 samples $\times$ 200 problems, GRPO and SFT models & $\approx$ 10 min \\
+\file{gsm8k.sbatch} & 3 GSM8K evaluations (100 problems each), no training & $\approx$ 16 min \\
+\midrule
+total & & $\approx$ 2.6 h \\
+\bottomrule
+\end{tabular}
+\end{center}
+Please smoke-test with small sizes first: a crashed long job wastes your time and the shared queue. The default
+settings need a 48\,GB GPU such as the A40. If you hit out-of-memory errors, lower \texttt{-{}-micro-batch-size} or
+add \texttt{-{}-grad-checkpointing}; neither changes the math. With \texttt{-{}-micro-batch-size 4 -{}-grad-checkpointing}
+(SFT and GRPO) and \texttt{-{}-micro-batch-size 2 -{}-grad-checkpointing} (DPO) every stage fits in 16\,GB. The V100
+GPUs in the \texttt{gpu} partition are too old for the PyTorch version we use, so do not submit there.
+
+\section*{Helpful Hints and Resources}
+\begin{itemize}
+  \item In \texttt{grpo\_microbatch\_train\_step}, divide by \texttt{gradient\_accumulation\_steps}
+        \textbf{before} calling \texttt{backward()}.
+  \item A flat GRPO reward with \texttt{frac\_groups\_all\_same} $\approx 1$ means there is no learning signal.
+        Check your SFT model's accuracy first.
+  \item To see what your model actually generates, read the \texttt{completion} field of each line of
+        your \file{predictions.jsonl} files.
+  \item The reference papers below give the derivations behind each loss; the docstrings give the exact
+        conventions the tests expect.
+\end{itemize}
+
+\begin{thebibliography}{99}
+\bibitem{qwen25} Qwen Team. ``Qwen2.5 Technical Report.'' arXiv preprint arXiv:2412.15115 (2024).
+\bibitem{dpo} Rafailov, R., Sharma, A., Mitchell, E., Ermon, S., Manning, C. D., \& Finn, C. ``Direct Preference
+  Optimization: Your Language Model is Secretly a Reward Model.'' Advances in Neural Information Processing Systems (2023).
+\bibitem{ipo} Azar, M. G., Rowland, M., Piot, B., Guo, D., Calandriello, D., Valko, M., \& Munos, R. ``A General
+  Theoretical Paradigm to Understand Learning from Human Preferences.'' In International Conference on Artificial
+  Intelligence and Statistics (2024).
+\bibitem{instructgpt} Ouyang, L., Wu, J., Jiang, X., Almeida, D., Wainwright, C. L., Mishkin, P., et al. ``Training
+  Language Models to Follow Instructions with Human Feedback.'' Advances in Neural Information Processing Systems (2022).
+\bibitem{deepseekmath} Shao, Z., Wang, P., Zhu, Q., Xu, R., Song, J., Bi, X., et al. ``DeepSeekMath: Pushing the
+  Limits of Mathematical Reasoning in Open Language Models.'' arXiv preprint arXiv:2402.03300 (2024).
+\bibitem{selfconsistency} Wang, X., Wei, J., Schuurmans, D., Le, Q., Chi, E., Narang, S., Chowdhery, A., \& Zhou, D.
+  ``Self-Consistency Improves Chain of Thought Reasoning in Language Models.'' In International Conference on
+  Learning Representations (2023).
+\bibitem{codex} Chen, M., Tworek, J., Jun, H., Yuan, Q., Pinto, H. P. d. O., Kaplan, J., et al. ``Evaluating Large
+  Language Models Trained on Code.'' arXiv preprint arXiv:2107.03374 (2021).
+\bibitem{streamofsearch} Gandhi, K., Lee, D., Grand, G., Liu, M., Cheng, W., Sharma, A., \& Goodman, N. D. ``Stream
+  of Search (SoS): Learning to Search in Language.'' In Conference on Language Modeling (2024).
+\bibitem{rloo} Ahmadian, A., Cremer, C., Gall\'e, M., Fadaee, M., Kreutzer, J., Pietquin, O., \"Ust\"un, A., \&
+  Hooker, S. ``Back to Basics: Revisiting REINFORCE-Style Optimization for Learning from Human Feedback in LLMs.''
+  In Proceedings of the Association for Computational Linguistics (2024).
+\bibitem{ppo} Schulman, J., Wolski, F., Dhariwal, P., Radford, A., \& Klimov, O. ``Proximal Policy Optimization
+  Algorithms.'' arXiv preprint arXiv:1707.06347 (2017).
+\bibitem{dapo} Yu, Q., Zhang, Z., Zhu, R., Yuan, Y., Zuo, X., Yue, Y., et al. ``DAPO: An Open-Source LLM
+  Reinforcement Learning System at Scale.'' arXiv preprint arXiv:2503.14476 (2025).
+\bibitem{drgrpo} Liu, Z., Chen, C., Li, W., Qi, P., Pang, T., Du, C., Lee, W. S., \& Lin, M. ``Understanding
+  R1-Zero-Like Training: A Critical Perspective.'' arXiv preprint arXiv:2503.20783 (2025).
+\bibitem{gsm8k} Cobbe, K., Kosaraju, V., Bavarian, M., Chen, M., Jun, H., Kaiser, L., et al. ``Training Verifiers
+to Solve Math Word Problems.'' arXiv preprint arXiv:2110.14168 (2021).
+\end{thebibliography}
+
+\end{document}
